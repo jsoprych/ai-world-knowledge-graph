@@ -1,0 +1,282 @@
+{
+  "project": "AI World Knowledge Graph",
+  "codename": "ai-world-kg",
+  "version": "2.0.0",
+  "status": "active",
+  "last_updated": "2026-04-29",
+
+  "mission_statement": "A comprehensive, queryable, and continuously updating knowledge base of the global AI industry. It tracks every significant entity — companies, people, products, models, institutions — their interconnections, pricing, benchmarks, and the daily news that moves them. Designed for automated agents to ingest and answer 'who's who', 'what costs what', 'who competes with whom', and 'what happened today in AI'.",
+
+  "core_philosophy": {
+    "principle_1": "One generic 'entities' table — no rigid type constraints. Companies, people, products, universities, VCs, and government agencies all live in the same table differentiated by entity_type. The categories table provides hierarchical organization. This avoids schema migrations when new entity types emerge.",
+    "principle_2": "Relationships carry the semantics, not entity types. Two entities can have any relationship type (ceo_of, competes_with, trained_on, student_of). The relationship graph is the primary query surface.",
+    "principle_3": "JSON attrs blobs for anything that doesn't fit fixed columns. No ALTER TABLE to add niche fields.",
+    "principle_4": "SQLite-first. Portable, zero-dependency, easy to clone and ship. The entire DB is one file.",
+    "principle_5": "Daily freshness. News-driven updates via Brave Search + HackerNews, with market snapshots from Yahoo Finance."
+  },
+
+  "architecture": {
+    "database_engine": "SQLite 3 (WAL mode)",
+    "file_location": "/opt/data/ai_world.db",
+    "size": "~4 MB",
+    "cli_tool": "/opt/data/ai_world_helper.py (Python, zero dependencies beyond stdlib)",
+    "update_script": "/opt/data/ai_world_daily_update.py",
+    "reports_dir": "/opt/data/ai_world_reports/",
+    "cron_schedule": "0 4 * * * (daily at 4AM UTC)",
+    "deployment": "Hermes Agent cron job on elko homelab",
+    "public_mirror": "github.com/jsoprych/ai-world-knowledge-graph"
+  },
+
+  "data_sources": [
+    {
+      "name": "Brave Search API",
+      "purpose": "Primary news discovery. Searches for AI news across Reuters, MIT Tech Review, WIRED, CNBC, Bloomberg, SCMP, TechCrunch, VentureBeat, The Verge.",
+      "how_accessed": "Via Hermes Agent's MCP brave-search server (node-based, API key in config.yaml)",
+      "queries_per_run": "3-5 (general AI news + agents/MCP + model releases + Chinese AI + hardware)",
+      "fallback": "HackerNews Algolia API (hn.algolia.com)"
+    },
+    {
+      "name": "HackerNews Algolia API",
+      "purpose": "Community-sourced AI stories with upvote scores for relevance ranking",
+      "query": "AI+artificial+intelligence&numericFilters=created_at_i>{24h_ago}"
+    },
+    {
+      "name": "Yahoo Finance (via elko-market MCP)",
+      "purpose": "Stock price snapshots for AI companies",
+      "tickers": ["NVDA","AMD","TSM","ASML","AVGO","INTC","MSFT","GOOGL","AMZN","META","BABA","BIDU"]
+    },
+    {
+      "name": "SEC EDGAR (via elko-market MCP)",
+      "purpose": "Company financial data, insider trades, filings",
+      "used_for": "Financial depth on US-listed AI companies"
+    },
+    {
+      "name": "OpenRouter / AI World Graph MCP",
+      "purpose": "Model pricing tiers, benchmark scores, entity relationships",
+      "note": "These MCP servers contain overlapping data — used for cross-reference but primary source is the local DB"
+    }
+  ],
+
+  "schema": {
+    "tables": {
+      "entities": {
+        "rows": 316,
+        "description": "Universal entity table. Every node in the knowledge graph lives here.",
+        "columns": {
+          "id": "INTEGER PK auto-increment",
+          "entity_type": "TEXT — no CHECK constraint. Current values: company, person, product, vc_firm, gov_agency, nonprofit, university, research_group, investment_bank, hedge_fund, blog, institution, publication, podcast",
+          "name": "TEXT — display name",
+          "slug": "TEXT UNIQUE — url-friendly key (nullable)",
+          "aliases": "TEXT — JSON array of alternative names",
+          "description": "TEXT — 2-3 sentence summary",
+          "founded": "TEXT — freeform date (year or ISO)",
+          "hq": "TEXT — headquarters location",
+          "website": "TEXT — primary URL",
+          "x_handle": "TEXT — @username on X/Twitter",
+          "wikilink": "TEXT — Wikipedia URL",
+          "logo_url": "TEXT — image URL",
+          "status": "TEXT — active, acquired, merged, closed, dormant",
+          "attrs": "TEXT — JSON blob for any extra fields",
+          "created_at": "TEXT — auto-timestamp",
+          "updated_at": "TEXT — auto-timestamp"
+        },
+        "indexes": ["idx_entity_type ON entities(entity_type)", "idx_entity_name ON entities(name)", "idx_entity_slug ON entities(slug)"]
+      },
+
+      "relationships": {
+        "rows": 305,
+        "description": "Directed edges between entities. The relationship_type carries the semantics — 'ceo_of', 'competes_with', 'trained_on', 'invested_in', 'student_of', 'founded', etc.",
+        "columns": {
+          "source_id": "INTEGER FK → entities.id",
+          "target_id": "INTEGER FK → entities.id",
+          "relation_type": "TEXT — open vocabulary, no enum",
+          "start_date": "TEXT — when relationship began",
+          "end_date": "TEXT — when relationship ended (NULL = ongoing)",
+          "description": "TEXT — context",
+          "confidence": "INTEGER 1-5 — how confident we are in this relationship",
+          "attrs": "TEXT — JSON for investment amounts, share percentages, etc."
+        },
+        "indexes": ["idx_rel_source ON relationships(source_id)", "idx_rel_target ON relationships(target_id)", "idx_rel_type ON relationships(relation_type)"]
+      },
+
+      "models": {
+        "rows": 52,
+        "description": "AI/ML model cards with technical specs",
+        "columns": ["id", "name", "slug", "provider_id (FK→entities)", "model_family", "release_date", "architecture", "parameter_count (billions)", "context_window (tokens)", "max_output_tokens", "modalities (JSON)", "status"]
+      },
+
+      "model_pricing": {
+        "rows": 33,
+        "description": "Per-token pricing per model tier",
+        "columns": ["model_id (FK)", "tier (standard/batch/fine-tuned)", "input_price ($/1M tokens)", "output_price ($/1M tokens)", "effective_date", "source"]
+      },
+
+      "model_benchmarks": {
+        "rows": 52,
+        "description": "Benchmark scores per model",
+        "columns": ["model_id (FK)", "benchmark_id (FK→benchmarks)", "score", "score_max", "eval_date", "eval_method", "source"]
+      },
+
+      "benchmarks": {
+        "rows": 11,
+        "description": "Benchmark definitions",
+        "values": ["MMLU", "HumanEval", "GSM8K", "MATH", "Chatbot Arena ELO", "SWE-bench"]
+      },
+
+      "events": {
+        "rows": 84,
+        "description": "Timeline of notable AI industry events",
+        "columns": ["title", "date", "end_date", "description", "category (funding/acquisition/product_launch/research/regulation/hiring/partnership)"]
+      },
+
+      "categories": {
+        "rows": 34,
+        "description": "Hierarchical entity categories (e.g., llm_providers > us_llm_providers, creative_media > video_generation)",
+        "columns": ["name", "display_name", "parent_id (self-FK)"]
+      },
+
+      "blog_topic_suggestions": {
+        "rows": 9,
+        "description": "AI blog post ideas auto-generated from daily news",
+        "columns": ["title", "tags", "angle", "relevance_score 1-10", "status (suggested/used/archived)"]
+      },
+
+      "trending_tags": {
+        "rows": 8,
+        "description": "Topic frequency tracker — upserted daily from top story tags",
+        "columns": ["tag", "category", "first_seen", "last_seen", "mention_count", "peak_date"]
+      }
+    }
+  },
+
+  "cli_commands": {
+    "stats": "python3 /opt/data/ai_world_helper.py stats — full database statistics",
+    "list": "python3 /opt/data/ai_world_helper.py list [type] — list all entities or filter by type",
+    "get": "python3 /opt/data/ai_world_helper.py get <name> — entity details + all relationships",
+    "search": "python3 /opt/data/ai_world_helper.py search <term> — search names, descriptions, slugs",
+    "graph": "python3 /opt/data/ai_world_helper.py graph <name> — relationship neighborhood diagram",
+    "models": "python3 /opt/data/ai_world_helper.py models [family] — list models",
+    "model": "python3 /opt/data/ai_world_helper.py model <slug> — full model card + pricing + benchmarks",
+    "top": "python3 /opt/data/ai_world_helper.py top [benchmark] — leaderboard (default: Arena ELO)",
+    "bench": "python3 /opt/data/ai_world_helper.py bench [name] — benchmark rankings",
+    "prices": "python3 /opt/data/ai_world_helper.py prices [min_params] — cheapest models by output price",
+    "edge": "python3 /opt/data/ai_world_helper.py edge — models under 10B params for homelab",
+    "timeline": "python3 /opt/data/ai_world_helper.py timeline — recent events"
+  },
+
+  "daily_pipeline": {
+    "trigger": "Cron job at 4AM UTC (Hermes Agent: cron job 'ai-world-daily')",
+    "steps": [
+      {
+        "step": 1,
+        "name": "News Discovery (via Brave Search MCP)",
+        "detail": "Agent performs 3-5 Brave news searches with different angles. Collects 15-30 unique stories with titles, URLs, sources, snippets. Prioritizes Reuters, CNBC, Bloomberg, MIT Tech Review, WIRED, The Verge, TechCrunch, VentureBeat."
+      },
+      {
+        "step": 2,
+        "name": "News Fallback (via HackerNews API)",
+        "detail": "Script at /opt/data/ai_world_daily_update.py fetches HN Algolia API for AI-tagged stories in the last 24h. Returns sorted by points. Also provides DB stats."
+      },
+      {
+        "step": 3,
+        "name": "Market Data (via Yahoo Finance MCP)",
+        "detail": "Agent fetches current stock prices for 12 AI tickers (NVDA, AMD, TSM, ASML, AVGO, INTC, MSFT, GOOGL, AMZN, META, BABA, BIDU)."
+      },
+      {
+        "step": 4,
+        "name": "Report Composition",
+        "detail": "Agent writes markdown report to /opt/data/ai_world_reports/YYYY-MM-DD.md with: top stories (with clickable links), market snapshot, DB growth stats, trending tags."
+      },
+      {
+        "step": 5,
+        "name": "Email Delivery",
+        "detail": "Query mailing DB for ai-world-daily subscribers. Send individually via SMTP (mail.elko.ai:465) with personalized greeting. Save to INBOX.Sent via IMAP. Append unsubscribe footer."
+      },
+      {
+        "step": 6,
+        "name": "Audit Logging",
+        "detail": "Log send in hermes_mailing.db sends + send_recipients tables."
+      }
+    ]
+  },
+
+  "entity_types_currently_tracked": {
+    "company": 74,
+    "product": 120,
+    "person": 70,
+    "vc_firm": 6,
+    "gov_agency": 5,
+    "nonprofit": 5,
+    "university": 4,
+    "research_group": 3,
+    "investment_bank": 2,
+    "podcast": 2,
+    "blog": 1,
+    "publication": 10,
+    "hedge_fund": 1,
+    "institution": 1
+  },
+
+  "model_families_tracked": {
+    "Llama 3": 7,
+    "Claude 3": 5,
+    "DeepSeek R1": 5,
+    "GPT-4": 4,
+    "Qwen 2.5": 4,
+    "Gemini 1.5": 2,
+    "Gemini 2.0": 2,
+    "Grok": 2,
+    "Command R": 2,
+    "Mistral": 2,
+    "Mixtral": 2,
+    "Phi-3": 2,
+    "o1": 2,
+    "others": 11
+  },
+
+  "relationship_type_categories": {
+    "leadership": ["ceo_of", "cfo_of", "cto_of", "president_of", "coo_of", "chairman_of", "executive_director", "vp_research", "chief_scientist", "chief_architect", "directed_by"],
+    "founding": ["founded", "co_founded", "founding_member", "founded_with"],
+    "employment": ["researcher", "employee_of", "former_researcher", "professor", "professor_emeritus", "student_of"],
+    "investment": ["invested_in", "major_investor", "funded_by", "fully_funds"],
+    "competition": ["competes_with"],
+    "supply_chain": ["supplies", "trained_on", "cloud_primary", "available_on", "partnered_with"],
+    "product": ["created_by", "product_of", "led_development"],
+    "collaboration": ["collaborates_with", "evaluated", "evaluates", "published_open_letter"],
+    "institutional": ["researcher", "professor", "professor_emeritus", "student_of", "directed_by", "founded"]
+  },
+
+  "academic_lineage_tracked": [
+    "Geoffrey Hinton → Ilya Sutskever (student_of)",
+    "Geoffrey Hinton → Alex Krizhevsky (student_of)",
+    "Fei-Fei Li → Andrej Karpathy (student_of)"
+  ],
+
+  "current_gaps": [
+    "No DEEPSEEK V4 model card or pricing yet (released Apr 24, known: V4-Flash $0.14/$0.28, V4-Pro $0.145/$3.48 per 1M tokens)",
+    "No GPT-5.5 model card or pricing yet (released Apr 23, known: $5/$30 per 1M tokens)",
+    "No Claude Opus 4.7 model card (released Apr 16)",
+    "No Claude Mythos Preview model card",
+    "No Gemini 3.1 Pro model card",
+    "No Grok 4.3 model card",
+    "No Kimi K2.6 model card",
+    "Stock prices are snapshot only — no historical trend tracking",
+    "No automated entity discovery from news articles (new entities must be manually added)",
+    "No sentiment tracking per entity over time",
+    "No NER pipeline to extract entities from article text",
+    "No web UI or dashboard — CLI-only access"
+  ],
+
+  "future_roadmap": [
+    "Model refresh pipeline — add GPT-5.5, DeepSeek V4, Claude Opus 4.7, Gemini 3.1 Pro with real pricing and benchmarks",
+    "Automated entity extraction from news (NER + entity linking to existing DB)",
+    "Weekly ecosystem sweep — research missing companies/people and bulk-insert",
+    "Stock price history tracking (daily close prices stored as time series)",
+    "Web dashboard (Streamlit or similar) for visual exploration of the graph",
+    "Graph database export (NetworkX or Neo4j) for relationship queries",
+    "MCP server mode — serve the KG as an MCP tool for other agents to query",
+    "Benchmark score tracking over time (did model X get better/worse versions?)",
+    "Reddit/HN sentiment per entity",
+    "Cloud deployment (Modal or similar) for public API access"
+  ]
+}
